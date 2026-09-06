@@ -43,8 +43,7 @@ type apiError interface {
 }
 
 func errorCode(err error) string {
-	var api apiError
-	if errors.As(err, &api) {
+	if api, ok := errors.AsType[apiError](err); ok {
 		return api.ErrorCode()
 	}
 	return ""
@@ -55,8 +54,7 @@ func (s *session) operationError(operation string, err error) error {
 		return errCancelled
 	}
 	message := err.Error()
-	var api apiError
-	if errors.As(err, &api) {
+	if api, ok := errors.AsType[apiError](err); ok {
 		message = api.ErrorCode() + ": " + api.ErrorMessage()
 	}
 	for _, secret := range s.secrets {

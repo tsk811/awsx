@@ -67,7 +67,7 @@ func (p picker) matches() []row {
 	var matches []row
 	query := strings.ToLower(p.input.Value())
 	for _, r := range p.rows {
-		if strings.Contains(strings.ToLower(r.name), query) {
+		if strings.Contains(strings.ToLower(r.name+" "+r.detail), query) {
 			matches = append(matches, r)
 		}
 	}
@@ -142,7 +142,7 @@ type model struct {
 func newModel(ctx context.Context, cancel context.CancelFunc, command, path string, c config) *model {
 	var regionRows []row
 	for _, r := range regions {
-		regionRows = append(regionRows, row{value: r, name: r})
+		regionRows = append(regionRows, row{value: r.code, name: r.code, detail: r.name})
 	}
 	m := &model{
 		ctx: ctx, cancel: cancel, command: command, path: path,
