@@ -10,7 +10,8 @@ import (
 	"syscall"
 	"unicode"
 
-	tea "github.com/charmbracelet/bubbletea"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 )
 
 const usage = `Usage: awsx <command>
@@ -73,10 +74,10 @@ func run(args []string) error {
 		return fmt.Errorf("open interactive terminal: %w", err)
 	}
 	defer tty.Close()
-	configureStyles(tty)
 	signalCtx, stopSignals := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stopSignals()
-	// Cancelling AWS work must not kill the renderer before its final blank frame.
+	// Cancelling AWS work must not kill the program: a killed program skips its
+	// final frame, which carries the error screen.
 	ctx, cancel := context.WithCancel(signalCtx)
 	defer cancel()
 	m := newModel(ctx, cancel, args[0], path, c)
@@ -96,7 +97,7 @@ func run(args []string) error {
 		return errCancelled
 	}
 	// Nothing reaches stdout until the complete command has succeeded.
-	if _, err = fmt.Fprintln(tty, ui.success.Render("✓")+" "+m.confirmation); err != nil {
+	if _, err = lipgloss.Fprintln(tty, ui.success.Render("✓")+" "+m.confirmation); err != nil {
 		return fmt.Errorf("write confirmation: %w", err)
 	}
 	_, err = fmt.Fprint(os.Stdout, m.output)

@@ -3,35 +3,33 @@ package main
 import (
 	"context"
 	"fmt"
-	"os"
 	"strings"
 	"time"
 
+	"charm.land/bubbles/v2/spinner"
+	"charm.land/bubbles/v2/textinput"
+	tea "charm.land/bubbletea/v2"
+	"charm.land/lipgloss/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sso"
 	ssotypes "github.com/aws/aws-sdk-go-v2/service/sso/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssooidc"
-	"github.com/charmbracelet/bubbles/spinner"
-	"github.com/charmbracelet/bubbles/textinput"
-	tea "github.com/charmbracelet/bubbletea"
-	"github.com/charmbracelet/lipgloss"
 )
 
-var ui struct {
-	title, accent, selected, muted, warning, failure, success lipgloss.Style
-}
+var accent = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
 
-func configureStyles(tty *os.File) {
-	// stdout is captured by the Zsh wrapper. Detect color support from the
-	// same terminal that Bubble Tea uses, keeping ANSI out of shell exports.
-	lipgloss.SetDefaultRenderer(lipgloss.NewRenderer(tty))
-	ui.accent = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-	ui.title = ui.accent.Bold(true)
-	ui.selected = ui.title.Background(lipgloss.Color("6")).Foreground(lipgloss.Color("0"))
-	ui.muted = lipgloss.NewStyle().Foreground(lipgloss.Color("245"))
-	ui.warning = lipgloss.NewStyle().Foreground(lipgloss.Color("3"))
-	ui.failure = lipgloss.NewStyle().Foreground(lipgloss.Color("1"))
-	ui.success = lipgloss.NewStyle().Foreground(lipgloss.Color("2"))
+// Styles are plain values; Bubble Tea and lipgloss.Fprintln adapt their colors
+// to the terminal they write to.
+var ui = struct {
+	title, accent, selected, muted, warning, failure, success lipgloss.Style
+}{
+	title:    accent.Bold(true),
+	accent:   accent,
+	selected: accent.Bold(true).Background(lipgloss.Color("6")).Foreground(lipgloss.Color("0")),
+	muted:    lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
+	warning:  lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
+	failure:  lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
+	success:  lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
 }
 
 func keyHint(key, action string) string {
@@ -54,9 +52,11 @@ func newInput(placeholder string) textinput.Model {
 	i := textinput.New()
 	i.Prompt = "> "
 	i.Placeholder = placeholder
-	i.PromptStyle = ui.accent
-	i.PlaceholderStyle = ui.muted
-	i.Cursor.Style = ui.accent
+	styles := i.Styles()
+	styles.Focused.Prompt = ui.accent
+	styles.Focused.Placeholder = ui.muted
+	styles.Cursor.Color = lipgloss.Color("6")
+	i.SetStyles(styles)
 	i.Focus()
 	return i
 }
@@ -195,7 +195,7 @@ func (m *model) activePicker() *picker {
 
 func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	// A cancelled request can still deliver its final message while Quit is
-	// queued. Keep the final frame blank until the renderer has shut down.
+	// queued. Once cancelled or failed, the final frame and m.err stay as set.
 	if m.err != nil {
 		return m, nil
 	}
@@ -203,8 +203,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 	case tea.WindowSizeMsg:
 		m.height = msg.Height
 		width := max(1, msg.Width-4)
-		m.url.Width = width
-		m.regions.input.Width, m.accounts.input.Width, m.roles.input.Width = width, width, width
+		m.url.SetWidth(width)
+		m.regions.input.SetWidth(width)
+		m.accounts.input.SetWidth(width)
+		m.roles.input.SetWidth(width)
 		return m, nil
 	case authNotice:
 		m.status = string(msg)
@@ -242,7 +244,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 			return m, nil
 		}
 		return m, cmd
-	case tea.KeyMsg:
+	case tea.KeyPressMsg:
 		if msg.String() == "ctrl+c" {
 			return m.quit()
 		}
@@ -356,10 +358,11 @@ func (m *model) choose(r row) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
-func (m *model) View() string {
+func (m *model) View() tea.View {
+	var content string
 	switch m.screen {
 	case "url":
-		return ui.title.Render("AWSX · Initialize") + "\n\nIAM Identity Center start URL\n" + m.url.View() + "\n" + ui.failure.Render(m.validation) + "\n\n" + keyHints(keyHint("Enter", "continue"), keyHint("Esc / Ctrl+C", "cancel")) + "\n"
+		content = ui.title.Render("AWSX · Initialize") + "\n\nIAM Identity Center start URL\n" + m.url.View() + "\n" + ui.failure.Render(m.validation) + "\n\n" + keyHints(keyHint("Enter", "continue"), keyHint("Esc / Ctrl+C", "cancel")) + "\n"
 	case "region", "accounts", "roles":
 		heading := "AWS service region"
 		context := ""
@@ -373,11 +376,16 @@ func (m *model) View() string {
 			heading = "Select role"
 			context = terminalText(m.account.name) + " (" + terminalText(m.account.value) + ")\n"
 		}
-		return ui.title.Render("AWSX · "+heading) + "\n" + ui.muted.Render(context) + "\n" + m.activePicker().view(m.height) + "\n\n" + keyHints(keyHint("Type", "to search"), keyHint("↑/↓", "move"), keyHint("Enter", "select"), keyHint("Esc", "clear/back/cancel"), keyHint("Ctrl+C", "cancel")) + "\n"
+		content = ui.title.Render("AWSX · "+heading) + "\n" + ui.muted.Render(context) + "\n" + m.activePicker().view(m.height) + "\n\n" + keyHints(keyHint("Type", "to search"), keyHint("↑/↓", "move"), keyHint("Enter", "select"), keyHint("Esc", "clear/back/cancel"), keyHint("Ctrl+C", "cancel")) + "\n"
 	case "loading":
-		return ui.title.Render("AWSX") + "\n\n" + m.spin.View() + " " + m.status + "\n\n" + keyHint("Esc / Ctrl+C", "cancel") + "\n"
+		content = ui.title.Render("AWSX") + "\n\n" + m.spin.View() + " " + m.status + "\n\n" + keyHint("Esc / Ctrl+C", "cancel") + "\n"
 	case "error":
-		return ui.failure.Bold(true).Render("AWSX · Error") + "\n"
+		content = ui.failure.Bold(true).Render("AWSX · Error") + "\n"
 	}
-	return ""
+	v := tea.NewView(content)
+	// The inline renderer leaves stale rows behind when frames shrink; the
+	// alt screen is restored intact on exit, so no UI remnants reach the shell.
+	// The error frame is drawn inline so it stays above the error message.
+	v.AltScreen = m.screen != "error"
+	return v
 }

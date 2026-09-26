@@ -9,11 +9,11 @@ import (
 	"strings"
 	"time"
 
+	tea "charm.land/bubbletea/v2"
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/service/sso"
 	ssotypes "github.com/aws/aws-sdk-go-v2/service/sso/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssooidc"
-	tea "github.com/charmbracelet/bubbletea"
 )
 
 const deviceGrant = "urn:ietf:params:oauth:grant-type:device_code"
