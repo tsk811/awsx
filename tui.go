@@ -3,6 +3,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"image/color"
 	"strings"
 	"time"
 
@@ -16,31 +17,41 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/ssooidc"
 )
 
-var accent = lipgloss.NewStyle().Foreground(lipgloss.Color("6"))
-
 // Styles are plain values; Bubble Tea and lipgloss.Fprintln adapt their colors
-// to the terminal they write to.
-var ui = struct {
-	title, accent, selected, muted, warning, failure, success lipgloss.Style
-}{
-	title:    accent.Bold(true),
-	accent:   accent,
-	selected: accent.Bold(true).Background(lipgloss.Color("6")).Foreground(lipgloss.Color("0")),
-	muted:    lipgloss.NewStyle().Foreground(lipgloss.Color("245")),
-	warning:  lipgloss.NewStyle().Foreground(lipgloss.Color("3")),
-	failure:  lipgloss.NewStyle().Foreground(lipgloss.Color("1")),
-	success:  lipgloss.NewStyle().Foreground(lipgloss.Color("2")),
+// to the terminal they write to. ui starts with the dark-background palette
+// and is rebuilt once the terminal reports its background color.
+var ui = newTheme(true)
+
+type theme struct {
+	accent, text, muted, faint, failure, success, badge, key lipgloss.Style
 }
 
-func keyHint(key, action string) string {
-	return ui.accent.Bold(true).Render(key) + ui.muted.Render(" "+action)
+// newTheme builds the amber theme for a dark or light terminal background.
+func newTheme(dark bool) theme {
+	c := func(onLight, onDark string) color.Color {
+		return lipgloss.LightDark(dark)(lipgloss.Color(onLight), lipgloss.Color(onDark))
+	}
+	return theme{
+		accent:  lipgloss.NewStyle().Foreground(c("#C45500", "#FF9900")),
+		text:    lipgloss.NewStyle().Foreground(c("#16191F", "#E6E6E6")),
+		muted:   lipgloss.NewStyle().Foreground(c("#5F6B7A", "#8D99A8")),
+		faint:   lipgloss.NewStyle().Foreground(c("#9BA7B6", "#545B64")),
+		failure: lipgloss.NewStyle().Foreground(c("#D91515", "#FF5D64")),
+		success: lipgloss.NewStyle().Foreground(c("#037F0C", "#29AD32")),
+		badge:   lipgloss.NewStyle().Bold(true).Background(lipgloss.Color("#FF9900")).Foreground(lipgloss.Color("#232F3E")).Padding(0, 1),
+		key:     lipgloss.NewStyle().Background(c("#E9EBED", "#2A2E33")).Foreground(c("#16191F", "#E6E6E6")).Padding(0, 1),
+	}
 }
 
-func keyHints(hints ...string) string {
-	return strings.Join(hints, ui.muted.Render(" · "))
-}
+func keyHint(key, action string) string { return ui.key.Render(key) + " " + ui.muted.Render(action) }
 
-type row struct{ value, name, detail string }
+func keyHints(hints ...string) string { return strings.Join(hints, "  ") }
+
+func pad(s string, width int) string { return s + strings.Repeat(" ", max(0, width-lipgloss.Width(s))) }
+
+// detail and extra are secondary columns: an account's ID and email, or a
+// region's name.
+type row struct{ value, name, detail, extra string }
 
 type picker struct {
 	input  textinput.Model
@@ -48,15 +59,20 @@ type picker struct {
 	cursor int
 }
 
+func styleInput(i *textinput.Model) {
+	styles := i.Styles()
+	styles.Focused.Prompt = ui.accent.Bold(true)
+	styles.Focused.Placeholder = ui.faint
+	styles.Focused.Text = ui.text
+	styles.Cursor.Color = ui.accent.GetForeground()
+	i.SetStyles(styles)
+}
+
 func newInput(placeholder string) textinput.Model {
 	i := textinput.New()
-	i.Prompt = "> "
+	i.Prompt = "❯ "
 	i.Placeholder = placeholder
-	styles := i.Styles()
-	styles.Focused.Prompt = ui.accent
-	styles.Focused.Placeholder = ui.muted
-	styles.Cursor.Color = lipgloss.Color("6")
-	i.SetStyles(styles)
+	styleInput(&i)
 	i.Focus()
 	return i
 }
@@ -67,7 +83,7 @@ func (p picker) matches() []row {
 	var matches []row
 	query := strings.ToLower(p.input.Value())
 	for _, r := range p.rows {
-		if strings.Contains(strings.ToLower(r.name+" "+r.detail), query) {
+		if strings.Contains(strings.ToLower(r.name+" "+r.detail+" "+r.extra), query) {
 			matches = append(matches, r)
 		}
 	}
@@ -88,30 +104,36 @@ func (p *picker) move(delta int) { p.cursor = max(0, min(p.cursor+delta, len(p.m
 
 func (p picker) view(height int) string {
 	var b strings.Builder
-	b.WriteString(p.input.View() + "\n\n")
+	b.WriteString(" " + p.input.View() + "\n\n")
 	matches := p.matches()
 	if len(matches) == 0 {
-		return b.String() + ui.warning.Render("No matches.") + "\n"
+		return b.String() + "   " + ui.muted.Render("No matches for “"+terminalText(p.input.Value())+"”")
 	}
-	count := max(1, min(10, height-9))
+	nameWidth := 0
+	for _, r := range matches {
+		nameWidth = max(nameWidth, lipgloss.Width(terminalText(r.name)))
+	}
+	count := max(1, min(10, height-12))
 	start := max(0, min(p.cursor-count/2, len(matches)-count))
 	end := min(len(matches), start+count)
 	for i := start; i < end; i++ {
-		text := terminalText(matches[i].name)
+		name := pad(terminalText(matches[i].name), nameWidth+3)
+		detail, extra := terminalText(matches[i].detail), terminalText(matches[i].extra)
+		var line string
 		if i == p.cursor {
-			if matches[i].detail != "" {
-				text += "  |  " + terminalText(matches[i].detail)
+			line = ui.accent.Render("▌ ") + ui.accent.Bold(true).Render(name) + ui.text.Render(detail)
+			if extra != "" {
+				line += "   " + ui.muted.Render(extra)
 			}
-			text = ui.selected.Render("> " + text)
 		} else {
-			if matches[i].detail != "" {
-				text += ui.muted.Render("  |  " + terminalText(matches[i].detail))
+			line = "  " + ui.text.Render(name) + ui.muted.Render(detail)
+			if extra != "" {
+				line += "   " + ui.faint.Render(extra)
 			}
-			text = "  " + text
 		}
-		b.WriteString(text + "\n")
+		b.WriteString(" " + line + "\n")
 	}
-	b.WriteString("\n" + ui.accent.Bold(true).Render(fmt.Sprint(p.cursor+1)) + ui.muted.Render(" / ") + ui.accent.Render(fmt.Sprint(len(matches))))
+	b.WriteString("\n " + ui.faint.Render(fmt.Sprintf("%d of %d", p.cursor+1, len(matches))))
 	return b.String()
 }
 
@@ -147,7 +169,7 @@ func newModel(ctx context.Context, cancel context.CancelFunc, command, path stri
 	m := &model{
 		ctx: ctx, cancel: cancel, command: command, path: path,
 		url: newInput("https://company.awsapps.com/start"), regions: newPicker(regionRows),
-		accounts: newPicker(nil), roles: newPicker(nil), spin: spinner.New(spinner.WithStyle(ui.accent)), height: 24,
+		accounts: newPicker(nil), roles: newPicker(nil), spin: spinner.New(spinner.WithSpinner(spinner.Points), spinner.WithStyle(ui.accent)), height: 24,
 		session: &session{config: c, path: path},
 	}
 	switch command {
@@ -166,7 +188,7 @@ func newModel(ctx context.Context, cancel context.CancelFunc, command, path stri
 
 func (m *model) Init() tea.Cmd {
 	if m.command == "login" {
-		return tea.Batch(m.spin.Tick, func() tea.Msg {
+		return tea.Batch(tea.RequestBackgroundColor, m.spin.Tick, func() tea.Msg {
 			if err := m.session.authenticate(m.ctx, false); err != nil {
 				return failureMsg{err}
 			}
@@ -178,7 +200,15 @@ func (m *model) Init() tea.Cmd {
 			return accountsMsg(accounts)
 		})
 	}
-	return textinput.Blink
+	return tea.Batch(tea.RequestBackgroundColor, textinput.Blink)
+}
+
+// restyle reapplies ui to the components that copied its styles.
+func (m *model) restyle() {
+	for _, i := range []*textinput.Model{&m.url, &m.regions.input, &m.accounts.input, &m.roles.input} {
+		styleInput(i)
+	}
+	m.spin.Style = ui.accent
 }
 
 func (m *model) activePicker() *picker {
@@ -208,6 +238,10 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		m.accounts.input.SetWidth(width)
 		m.roles.input.SetWidth(width)
 		return m, nil
+	case tea.BackgroundColorMsg:
+		ui = newTheme(msg.IsDark())
+		m.restyle()
+		return m, nil
 	case authNotice:
 		m.status = string(msg)
 		return m, nil
@@ -216,7 +250,7 @@ func (m *model) Update(msg tea.Msg) (tea.Model, tea.Cmd) {
 		return m, tea.Quit
 	case accountsMsg:
 		for _, a := range msg {
-			m.accounts.rows = append(m.accounts.rows, row{value: aws.ToString(a.AccountId), name: aws.ToString(a.AccountName), detail: aws.ToString(a.AccountId) + "  |  " + aws.ToString(a.EmailAddress)})
+			m.accounts.rows = append(m.accounts.rows, row{value: aws.ToString(a.AccountId), name: aws.ToString(a.AccountName), detail: aws.ToString(a.AccountId), extra: aws.ToString(a.EmailAddress)})
 		}
 		m.screen = "accounts"
 		return m, textinput.Blink
@@ -358,29 +392,61 @@ func (m *model) choose(r row) (tea.Model, tea.Cmd) {
 	return m, nil
 }
 
+// header is the awsx badge followed by the command's steps, with the current
+// step highlighted.
+func (m *model) header() string {
+	steps, current := []string{"region"}, 0
+	switch m.command {
+	case "init":
+		steps, current = []string{"init", "start url", "region"}, 1
+		if m.screen != "url" {
+			current = 2
+		}
+	case "login":
+		steps = []string{"login", "account", "role"}
+		switch {
+		case m.screen == "roles" || m.role != "":
+			current = 2
+		case len(m.accounts.rows) > 0:
+			current = 1
+		}
+	}
+	for i, step := range steps {
+		switch {
+		case i == current:
+			steps[i] = ui.accent.Bold(true).Render(step)
+		case i < current:
+			steps[i] = ui.muted.Render(step)
+		default:
+			steps[i] = ui.faint.Render(step)
+		}
+	}
+	return ui.badge.Render("awsx") + "  " + strings.Join(steps, ui.faint.Render(" › "))
+}
+
 func (m *model) View() tea.View {
-	var content string
+	content := "\n " + m.header() + "\n\n"
 	switch m.screen {
 	case "url":
-		content = ui.title.Render("AWSX · Initialize") + "\n\nIAM Identity Center start URL\n" + m.url.View() + "\n" + ui.failure.Render(m.validation) + "\n\n" + keyHints(keyHint("Enter", "continue"), keyHint("Esc / Ctrl+C", "cancel")) + "\n"
+		content += " " + ui.muted.Render("IAM Identity Center start URL") + "\n " + m.url.View() + "\n " + ui.failure.Render(m.validation) + "\n\n " + keyHints(keyHint("enter", "continue"), keyHint("esc", "cancel")) + "\n"
 	case "region", "accounts", "roles":
-		heading := "AWS service region"
 		context := ""
-		if m.command == "init" {
-			heading = "IAM Identity Center region"
+		switch {
+		case m.screen == "roles":
+			context = ui.muted.Render("account ") + ui.text.Bold(true).Render(terminalText(m.account.name)) + ui.faint.Render("  "+terminalText(m.account.value))
+		case m.screen == "region" && m.command == "init":
+			context = ui.muted.Render("IAM Identity Center region")
+		case m.screen == "region":
+			context = ui.muted.Render("AWS service region")
 		}
-		if m.screen == "accounts" {
-			heading = "Select account"
+		if context != "" {
+			content += " " + context + "\n\n"
 		}
-		if m.screen == "roles" {
-			heading = "Select role"
-			context = terminalText(m.account.name) + " (" + terminalText(m.account.value) + ")\n"
-		}
-		content = ui.title.Render("AWSX · "+heading) + "\n" + ui.muted.Render(context) + "\n" + m.activePicker().view(m.height) + "\n\n" + keyHints(keyHint("Type", "to search"), keyHint("↑/↓", "move"), keyHint("Enter", "select"), keyHint("Esc", "clear/back/cancel"), keyHint("Ctrl+C", "cancel")) + "\n"
+		content += m.activePicker().view(m.height) + "\n\n " + keyHints(keyHint("↑↓", "move"), keyHint("enter", "select"), keyHint("esc", "clear/back"), keyHint("ctrl+c", "cancel")) + "\n"
 	case "loading":
-		content = ui.title.Render("AWSX") + "\n\n" + m.spin.View() + " " + m.status + "\n\n" + keyHint("Esc / Ctrl+C", "cancel") + "\n"
+		content += " " + lipgloss.JoinHorizontal(lipgloss.Top, m.spin.View()+" ", ui.text.Render(m.status)) + "\n\n " + keyHint("esc", "cancel") + "\n"
 	case "error":
-		content = ui.failure.Bold(true).Render("AWSX · Error") + "\n"
+		content = ui.badge.Render("awsx") + " " + ui.failure.Bold(true).Render("error") + "\n"
 	}
 	v := tea.NewView(content)
 	// The inline renderer leaves stale rows behind when frames shrink; the
