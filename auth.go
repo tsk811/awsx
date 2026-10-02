@@ -14,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/service/sso"
 	ssotypes "github.com/aws/aws-sdk-go-v2/service/sso/types"
 	"github.com/aws/aws-sdk-go-v2/service/ssooidc"
+	oidctypes "github.com/aws/aws-sdk-go-v2/service/ssooidc/types"
 )
 
 const deviceGrant = "urn:ietf:params:oauth:grant-type:device_code"
@@ -55,7 +56,13 @@ func (s *session) operationError(operation string, err error) error {
 	}
 	message := err.Error()
 	if api, ok := errors.AsType[apiError](err); ok {
-		message = api.ErrorCode() + ": " + api.ErrorMessage()
+		detail := api.ErrorMessage()
+		// The OIDC SDK keeps this exception's explanation separately from
+		// ErrorMessage, which can otherwise leave only the exception name.
+		if invalid, ok := errors.AsType[*oidctypes.InvalidRequestException](err); ok && detail == "" {
+			detail = aws.ToString(invalid.Error_description)
+		}
+		message = api.ErrorCode() + ": " + detail
 	}
 	for _, secret := range s.secrets {
 		if secret != "" {
@@ -95,9 +102,10 @@ func (s *session) authenticate(ctx context.Context, force bool) error {
 			return s.storeToken(out)
 		}
 		switch errorCode(err) {
-		case "InvalidGrantException", "InvalidClientException", "UnauthorizedClientException", "ExpiredTokenException", "AccessDeniedException", "invalid_grant", "invalid_client", "unauthorized_client", "expired_token", "access_denied":
-			// Rejected refresh state is recoverable; exhausted transport/server
-			// retries are operational errors and must remain visible.
+		case "InvalidGrantException", "InvalidClientException", "UnauthorizedClientException", "ExpiredTokenException", "AccessDeniedException", "InvalidRequestException", "invalid_grant", "invalid_client", "unauthorized_client", "expired_token", "access_denied", "invalid_request":
+			// A rejected refresh request (including InvalidRequestException)
+			// falls back to fresh registration and device authorization.
+			// Exhausted transport/server retries must remain visible.
 		default:
 			return s.operationError("refresh access token", err)
 		}
